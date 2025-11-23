@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -15,12 +17,19 @@ type Cache struct {
 	mu      sync.RWMutex
 	items   map[string]string
 	maxSize int
+	hits    int64
+	misses  int64
 }
 
 func (c *Cache) Get(key string) (string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	val, ok := c.items[key]
+	if ok {
+		atomic.AddInt64(&c.hits, 1)
+	} else {
+		atomic.AddInt64(&c.misses, 1)
+	}
 	return val, ok
 }
 
@@ -34,7 +43,6 @@ func (c *Cache) Set(key, value string) {
 		}
 	}
 	c.items[key] = value
-	fmt.Printf("Cache size: %d / %d\n", len(c.items), c.maxSize)
 }
 
 func (c *Cache) Delete(key string) {
@@ -66,25 +74,36 @@ func main() {
 	if err := db.Ping(); err != nil {
 		log.Fatalf("Failed to ping database: %v", err)
 	}
-	fmt.Println("Successfully connected to PostgreSQL!")
 
 	createTableSQL := `
 	CREATE TABLE IF NOT EXISTS kv_store (
 		key TEXT PRIMARY KEY,
 		value TEXT
 	);`
+
 	if _, err := db.Exec(createTableSQL); err != nil {
 		log.Fatalf("Failed to create table: %v", err)
 	}
-	fmt.Println("Table 'kv_store' is ready.")
 
 	s := &Server{
 		db:    db,
 		cache: NewCache(1000),
 	}
 
-	http.HandleFunc("/kv/", s.kvHandler)
+	go func() {
+		for {
+			time.Sleep(5 * time.Second)
+			h := atomic.LoadInt64(&s.cache.hits)
+			m := atomic.LoadInt64(&s.cache.misses)
+			total := h + m
+			if total > 0 {
+				rate := float64(h) / float64(total) * 100
+				log.Printf("Cache Hits: %d | Misses: %d | Hit Rate: %.2f%%", h, m, rate)
+			}
+		}
+	}()
 
+	http.HandleFunc("/kv/", s.kvHandler)
 	fmt.Println("Server starting on port 8080...")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }

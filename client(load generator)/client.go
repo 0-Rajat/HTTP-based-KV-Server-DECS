@@ -20,13 +20,11 @@ var popularKeys = []string{"key-1", "key-2", "key-3", "key-4", "key-5"}
 
 func primePopularKeys() {
 	client := &http.Client{Timeout: 5 * time.Second}
-	fmt.Println("Priming database with popular keys...")
-
 	for _, key := range popularKeys {
 		val := "data-" + key
 		req, err := http.NewRequest("PUT", "http://localhost:8080/kv/"+key, bytes.NewBufferString(val))
 		if err != nil {
-			log.Printf("Failed to create prime request for %s: %v", key, err)
+			log.Printf("Failed to create prime request: %v", err)
 			continue
 		}
 		resp, err := client.Do(req)
@@ -35,20 +33,16 @@ func primePopularKeys() {
 			continue
 		}
 		resp.Body.Close()
-		if resp.StatusCode >= 400 {
-			log.Printf("Warning: Priming %s returned status %d", key, resp.StatusCode)
-		}
 	}
-	fmt.Println("Priming complete.")
 }
 
 func main() {
-	numClients := flag.Int("clients", 10, "Number of concurrent clients (users)")
+	numClients := flag.Int("clients", 10, "Number of concurrent clients")
 	durationSec := flag.Int("duration", 30, "Test duration in seconds")
-	workloadType := flag.String("workload", "get-popular", "Workload type: get-popular, put-all, or get-all")
+	workloadType := flag.String("workload", "get-popular", "Type: get-popular, put-all, get-all, or mixed")
 	flag.Parse()
 
-	if *workloadType == "get-popular" {
+	if *workloadType == "get-popular" || *workloadType == "mixed" {
 		primePopularKeys()
 	}
 
@@ -56,8 +50,6 @@ func main() {
 	resultsChan := make(chan Result)
 	var wg sync.WaitGroup
 	stopChan := make(chan struct{})
-
-	fmt.Printf("Starting load test with %d clients for %d seconds...\n", *numClients, *durationSec)
 
 	for i := 0; i < *numClients; i++ {
 		wg.Add(1)
@@ -89,19 +81,26 @@ func main() {
 	testDuration := time.Duration(*durationSec) * time.Second
 	successfulRequests := totalRequests - totalErrors
 	throughput := float64(successfulRequests) / testDuration.Seconds()
+
 	var avgResponseTimeMs int64
 	if totalRequests > 0 {
 		avgResponseTimeMs = (totalResponseTime / time.Duration(totalRequests)).Milliseconds()
 	}
 
-	fmt.Println("\n--- Load Test Finished ---")
-	fmt.Printf("Workload Type:     %s\n", *workloadType)
-	fmt.Printf("Test Duration:     %s\n", testDuration)
-	fmt.Printf("Total Requests:    %d\n", totalRequests)
-	fmt.Printf("Successful Requests: %d\n", successfulRequests)
-	fmt.Printf("Failed Requests:   %d\n", totalErrors)
-	fmt.Printf("Average Throughput:  %.2f reqs/sec\n", throughput)
-	fmt.Printf("Average Response Time: %d ms\n", avgResponseTimeMs)
+	fmt.Println("\n===================================")
+	fmt.Println("       LOAD TEST RESULTS")
+	fmt.Println("===================================")
+	fmt.Printf("Workload:            %s\n", *workloadType)
+	fmt.Printf("Active Clients:      %d\n", *numClients)
+	fmt.Printf("Duration:            %s\n", testDuration)
+	fmt.Println("-----------------------------------")
+	fmt.Printf("Total Requests:      %d\n", totalRequests)
+	fmt.Printf("Success:             %d\n", successfulRequests)
+	fmt.Printf("Failed:              %d\n", totalErrors)
+	fmt.Println("-----------------------------------")
+	fmt.Printf("THROUGHPUT:          %.2f reqs/sec\n", throughput)
+	fmt.Printf("AVG RESPONSE TIME:   %d ms\n", avgResponseTimeMs)
+	fmt.Println("===================================")
 }
 
 func runClient(id int, workload string, results chan<- Result, wg *sync.WaitGroup, stopChan <-chan struct{}) {
@@ -123,31 +122,43 @@ func runClient(id int, workload string, results chan<- Result, wg *sync.WaitGrou
 		case "get-popular":
 			key := popularKeys[rand.Intn(len(popularKeys))]
 			req, err = http.NewRequest("GET", "http://localhost:8080/kv/"+key, nil)
+
 		case "put-all":
 			key := fmt.Sprintf("key-%d-%d", id, time.Now().UnixNano())
 			val := "some-data-payload"
 			req, err = http.NewRequest("PUT", "http://localhost:8080/kv/"+key, bytes.NewBufferString(val))
+
 		case "get-all":
 			key := fmt.Sprintf("key-%d-%d", id, time.Now().UnixNano())
 			req, err = http.NewRequest("GET", "http://localhost:8080/kv/"+key, nil)
+
+		case "mixed":
+			if rand.Float32() < 0.5 {
+				key := popularKeys[rand.Intn(len(popularKeys))]
+				req, err = http.NewRequest("GET", "http://localhost:8080/kv/"+key, nil)
+			} else {
+				key := fmt.Sprintf("key-%d-%d", id, time.Now().UnixNano())
+				val := "data-mixed-" + key
+				req, err = http.NewRequest("PUT", "http://localhost:8080/kv/"+key, bytes.NewBufferString(val))
+			}
+
 		default:
 			log.Fatalf("Unknown workload type: %s", workload)
 		}
 
 		if err != nil {
-			results <- Result{responseTime: 0, isError: true}
+			results <- Result{0, true}
 			continue
 		}
 
 		resp, err := client.Do(req)
 		responseTime := time.Since(startTime)
-		isError := false
-		if err != nil || resp.StatusCode >= 400 {
-			isError = true
-		}
+
+		isError := err != nil || resp.StatusCode >= 400
 		if resp != nil {
 			resp.Body.Close()
 		}
-		results <- Result{responseTime: responseTime, isError: isError}
+
+		results <- Result{responseTime, isError}
 	}
 }
